@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-# mail_scrape_bot.py — minimal: reads unseen emails, scrapes first URL on page for images,
-# zips them and replies attaching the zip. Configure via env vars.
+# mail_scrape_send.py — reads unseen emails, scrapes first URL on page for images,
+# zips them and replies attaching the zip. Configure via env vars or create a .env.
 
-import os, re, imaplib, email, tempfile, zipfile, smtplib, hashlib, time
+import os, re, imaplib, email, tempfile, zipfile, smtplib, hashlib, time, socket
 from email.header import decode_header, make_header
 from email.message import EmailMessage
+from email.utils import parseaddr
 from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
@@ -16,27 +17,38 @@ try:
 except Exception:
     pass
 
-EMAIL_USER = "thejoshdaff@outlook.com"
-EMAIL_PASS = "oiuvuutgjexysypt"
-IMAP_HOST  = "outlook.office365.com"
-IMAP_PORT  = int("993")
-SMTP_HOST  = "smtp.office365.com"
-SMTP_PORT  = int("587")
+# Configuration (use env vars to override)
+EMAIL_USER = os.getenv("EMAIL_USER", "thejoshdaff@outlook.com")
+EMAIL_PASS = os.getenv("EMAIL_PASS", "oiuvuutgjexysypt")
+IMAP_HOST  = os.getenv("IMAP_HOST", "outlook.office365.com")
+IMAP_PORT  = int(os.getenv("IMAP_PORT", "993"))
+SMTP_HOST  = os.getenv("SMTP_HOST", "smtp.office365.com")
+SMTP_PORT  = int(os.getenv("SMTP_PORT", "587"))
+
+# quick presence check (DO NOT print secrets)
+print("ENV check: EMAIL_USER present?", bool(EMAIL_USER))
+print("ENV check: EMAIL_PASS present?", bool(EMAIL_PASS))
+print("ENV check: IMAP_HOST:", IMAP_HOST, "IMAP_PORT:", IMAP_PORT)
+print("ENV check: SMTP_HOST:", SMTP_HOST, "SMTP_PORT:", SMTP_PORT)
+
 if not EMAIL_USER or not EMAIL_PASS:
-    print("ERROR: Set EMAIL_USER and EMAIL_PASS environment variables (or create a .env).")
+    print("ERROR: EMAIL_USER and EMAIL_PASS must be set (env or .env).")
     raise SystemExit(1)
 
+# scraping constants
 URL_RE = re.compile(r"https?://[^\s'\"<>]+", re.I)
 USER_AGENT = "SimpleMailScrapeBot/1.0"
 MIN_BYTES = 1024
 MAX_IMAGES = 30
+REQUEST_TIMEOUT = 20
 
 def decode_subject(msg):
     return str(make_header(decode_header(msg.get("Subject",""))))
 
 def extract_sender(from_hdr):
-    m = re.search(r"[\w\.-]+@[\w\.-]+", from_hdr or "")
-    return m.group(0) if m else None
+    # robust extraction of the email address
+    name, addr = parseaddr(from_hdr or "")
+    return addr or None
 
 def get_text_parts(msg):
     texts=[]
@@ -48,12 +60,14 @@ def get_text_parts(msg):
                 try:
                     payload = p.get_payload(decode=True)
                     if payload: texts.append(payload.decode(errors="ignore"))
-                except: pass
+                except Exception:
+                    pass
     else:
         try:
             payload = msg.get_payload(decode=True)
             if payload: texts.append(payload.decode(errors="ignore"))
-        except: pass
+        except Exception:
+            pass
     return texts
 
 def first_url_from_msg(msg):
@@ -64,9 +78,11 @@ def first_url_from_msg(msg):
 
 def fetch_html(url):
     try:
-        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=20)
+        r = requests.get(url, headers={"User-Agent": USER_AGENT}, timeout=REQUEST_TIMEOUT)
         if r.status_code==200: return r.text
-    except: pass
+        print(f"fetch_html: non-200 status {r.status_code} for {url}")
+    except Exception as e:
+        print("fetch_html error:", e)
     return None
 
 def extract_image_urls(base, html):
@@ -87,19 +103,21 @@ def download_images(urls, outdir, max_images=30):
         if len(saved)>=max_images: break
         try:
             r = requests.get(u, headers={"User-Agent": USER_AGENT}, timeout=30)
-            if r.status_code!=200: continue
+            if r.status_code!=200:
+                continue
             data=r.content
             if len(data)<MIN_BYTES: continue
             h=hashlib.sha1(data).hexdigest()
             if h in seen: continue
             seen.add(h)
-            name = Path(u).name or f"img_{h[:8]}"
+            name = Path(requests.utils.urlparse(u).path).name or f"img_{h[:8]}"
             safe = re.sub(r'[^A-Za-z0-9_.-]','_',name)
             p = outdir / f"{h[:10]}_{safe}"
             p.write_bytes(data)
             saved.append(p)
             time.sleep(0.2)
-        except: continue
+        except Exception:
+            continue
     return saved
 
 def zip_files(files, zip_path):
@@ -116,56 +134,124 @@ def send_reply_with_zip(to_addr, subj, body, zip_path):
         em.add_attachment(zip_path.read_bytes(), maintype="application", subtype="zip", filename=zip_path.name)
     try:
         with smtplib.SMTP(SMTP_HOST, SMTP_PORT, timeout=60) as s:
-            s.ehlo(); s.starttls(); s.ehlo()
+            s.ehlo()
+            s.starttls()
+            s.ehlo()
             s.login(EMAIL_USER, EMAIL_PASS)
             s.send_message(em)
         return True
     except Exception as e:
-        print("SMTP send failed:", e); return False
+        print("SMTP send failed:", e)
+        return False
 
 def fetch_unseen():
-    M = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
-    M.login(EMAIL_USER, EMAIL_PASS)
-    M.select("INBOX")
-    typ,data = M.search(None,'(UNSEEN)')
-    msgs=[]
-    if typ=="OK":
-        for num in data[0].split():
-            t,m = M.fetch(num, '(RFC822)')
-            if t=="OK":
-                msgs.append((num, email.message_from_bytes(m[0][1])))
-    return M,msgs
+    # Try connect to IMAP server with clearer errors
+    try:
+        # quick socket-level check (helps differentiate "refused" vs DNS)
+        sock = socket.create_connection((IMAP_HOST, IMAP_PORT), timeout=10)
+        sock.close()
+    except Exception as e:
+        print("IMAP connect test failed:", e)
+        return None, []
 
-def mark_seen(mconn, num): 
-    try: mconn.store(num, '+FLAGS', '\\Seen')
-    except: pass
+    try:
+        M = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+    except Exception as e:
+        print("IMAP open error:", e)
+        return None, []
+
+    try:
+        M.login(EMAIL_USER, EMAIL_PASS)
+    except imaplib.IMAP4.error as e:
+        print("IMAP login failed:", e)
+        try: M.logout()
+        except: pass
+        return None, []
+    except Exception as e:
+        print("IMAP login unexpected error:", e)
+        try: M.logout()
+        except: pass
+        return None, []
+
+    try:
+        M.select("INBOX")
+        typ, data = M.search(None, '(UNSEEN)')
+    except Exception as e:
+        print("IMAP search/select error:", e)
+        try: M.logout()
+        except: pass
+        return None, []
+
+    msgs=[]
+    if typ == "OK" and data and data[0]:
+        for num in data[0].split():
+            try:
+                t,m = M.fetch(num, '(RFC822)')
+                if t == "OK" and m and m[0]:
+                    msgs.append((num, email.message_from_bytes(m[0][1])))
+            except Exception:
+                continue
+    return M, msgs
+
+def mark_seen(mconn, num):
+    if not mconn: return
+    try:
+        # num may be bytes; imaplib.store accepts bytes or ascii string
+        if isinstance(num, bytes):
+            seq = num.decode()
+        else:
+            seq = str(num)
+        mconn.store(seq, '+FLAGS', '\\Seen')
+    except Exception:
+        pass
 
 def main():
-    M,msgs = fetch_unseen()
+    M, msgs = fetch_unseen()
+    if M is None:
+        print("IMAP unavailable — aborting.")
+        return
     if not msgs:
-        print("No unseen messages"); M.logout(); return
-    for num,msg in msgs:
-        subj = decode_subject(msg); frm = msg.get("From",""); sender = extract_sender(frm)
-        print("Processing:", sender, subj)
+        print("No unseen messages")
+        try: M.logout()
+        except: pass
+        return
+
+    for num, msg in msgs:
+        subj = decode_subject(msg)
+        frm = msg.get("From","")
+        sender = extract_sender(frm)
+        print("Processing:", sender, "|", subj)
+        if not sender:
+            print("Could not determine sender; skipping")
+            mark_seen(M, num)
+            continue
+
         url = first_url_from_msg(msg)
         if not url:
-            print("No URL; skipping"); mark_seen(M,num); continue
+            print("No URL; skipping"); mark_seen(M, num); continue
+
         html = fetch_html(url)
         if not html:
-            print("Failed to fetch page"); mark_seen(M,num); continue
+            print("Failed to fetch page"); mark_seen(M, num); continue
+
         img_urls = extract_image_urls(url, html)
         if not img_urls:
-            print("No images found"); mark_seen(M,num); continue
+            print("No images found"); mark_seen(M, num); continue
+
         with tempfile.TemporaryDirectory() as td:
             outdir = Path(td)/"images"; outdir.mkdir()
             saved = download_images(img_urls, outdir, MAX_IMAGES)
             if not saved:
-                print("No images downloaded"); mark_seen(M,num); continue
+                print("No images downloaded"); mark_seen(M, num); continue
             zip_path = Path(td)/"images.zip"; zip_files(saved, zip_path)
             ok = send_reply_with_zip(sender, subj, f"Images from {url}", zip_path)
             print("Sent:", ok)
-        mark_seen(M,num)
-    M.logout()
+        mark_seen(M, num)
+
+    try:
+        M.logout()
+    except Exception:
+        pass
 
 if __name__=="__main__":
     main()
