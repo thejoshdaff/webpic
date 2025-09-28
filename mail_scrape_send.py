@@ -19,10 +19,9 @@ except Exception:
 EMAIL_USER = "thejoshdaff@outlook.com"
 EMAIL_PASS = "oiuvuutgjexysypt"
 IMAP_HOST  = "outlook.office365.com"
-IMAP_PORT  = "993"
-SMTP_HOST  = os.getenv("SMTP_HOST", "smtp.office365.com")
-SMTP_PORT  = int(os.getenv("SMTP_PORT", 587))
-
+IMAP_PORT  = int("993")
+SMTP_HOST  = "smtp.office365.com"
+SMTP_PORT  = int("587")
 if not EMAIL_USER or not EMAIL_PASS:
     print("ERROR: Set EMAIL_USER and EMAIL_PASS environment variables (or create a .env).")
     raise SystemExit(1)
