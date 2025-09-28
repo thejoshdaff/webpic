@@ -1,0 +1,4 @@
+resend
+aiohttp
+beautifulsoup4
+python-dotenv
