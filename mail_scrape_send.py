@@ -18,8 +18,8 @@ except Exception:
 
 EMAIL_USER = "thejoshdaff@outlook.com"
 EMAIL_PASS = "oiuvuutgjexysypt"
-IMAP_HOST  = os.getenv("IMAP_HOST", "outlook.office365.com")
-IMAP_PORT  = int(os.getenv("IMAP_PORT", 993))
+IMAP_HOST  = "outlook.office365.com"
+IMAP_PORT  = "993"
 SMTP_HOST  = os.getenv("SMTP_HOST", "smtp.office365.com")
 SMTP_PORT  = int(os.getenv("SMTP_PORT", 587))
 
