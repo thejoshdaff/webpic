@@ -16,8 +16,8 @@ try:
 except Exception:
     pass
 
-EMAIL_USER = os.getenv("EMAIL_USER")
-EMAIL_PASS = os.getenv("EMAIL_PASS")
+EMAIL_USER = "thejoshdaff@outlook.com"
+EMAIL_PASS = "oiuvuutgjexysypt"
 IMAP_HOST  = os.getenv("IMAP_HOST", "outlook.office365.com")
 IMAP_PORT  = int(os.getenv("IMAP_PORT", 993))
 SMTP_HOST  = os.getenv("SMTP_HOST", "smtp.office365.com")
